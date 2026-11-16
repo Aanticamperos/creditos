@@ -112,6 +112,14 @@ export function AppShell({
               <PlusIcon className="h-3.5 w-3.5" />
               Nuevo préstamo
             </Link>
+            <Link
+              href="/consulta"
+              target="_blank"
+              onClick={() => setMobileOpen(false)}
+              className="flex items-center justify-center gap-1.5 rounded-lg border border-slate-800 px-3 py-1.5 text-[11px] font-medium text-slate-400 transition hover:bg-slate-800 hover:text-white"
+            >
+              Portal público clientes ↗
+            </Link>
           </div>
         </div>
       </div>

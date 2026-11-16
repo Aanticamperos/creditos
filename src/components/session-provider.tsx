@@ -50,7 +50,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   });
 
   const refresh = useCallback(async () => {
-    if (pathname === '/login') {
+    if (pathname === '/login' || pathname.startsWith('/consulta')) {
       setSession((prev) => ({ ...prev, loading: false }));
       return;
     }

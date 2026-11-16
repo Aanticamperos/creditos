@@ -1,6 +1,7 @@
 'use client';
 
 import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 import { FormEvent, useState } from 'react';
 import { EyeIcon, EyeOffIcon } from '@/components/icons';
 import { createClient } from '@/lib/supabase';
@@ -123,9 +124,17 @@ export default function LoginPage() {
           </button>
         </form>
 
-        <p className="mt-6 text-center text-xs text-slate-400">
-          Registro público deshabilitado. Los accesos se gestionan desde Administración.
-        </p>
+        <div className="mt-6 space-y-2 border-t border-slate-100 pt-5 text-center">
+          <p className="text-xs text-slate-400">
+            Registro público deshabilitado. Los accesos se gestionan desde Administración.
+          </p>
+          <Link
+            href="/consulta"
+            className="inline-block text-xs font-semibold text-emerald-700 hover:text-emerald-800 hover:underline"
+          >
+            ¿Eres cliente? Consulta el saldo de tu crédito aquí →
+          </Link>
+        </div>
       </div>
     </main>
   );

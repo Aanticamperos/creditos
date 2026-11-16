@@ -10,7 +10,8 @@ Sistema integral de administración de préstamos, cobranza y cartera en COP, co
 - **Préstamos (`/prestamos`, `/prestamos/[id]`)**: Cartera filtrable, simulador y creación atómica con calendario de días hábiles y festivos colombianos, snapshot regulatorio, activación/bloqueo, congelación de mora y ajustes financieros auditados.
 - **Pagos (`/pagos`)**: Distribución automática en cascada o manual sobre cuotas y penalizaciones, comprobante imprimible y compartible por WhatsApp, historial y reversión administrativa auditada.
 - **Reportes y Auditoría (`/reportes`)**: Rentabilidad, índice de morosidad, antigüedad de cartera, exportaciones CSV (UTF-8) y bitácora inmutable de auditoría.
-- **Configuración (`/configuracion`)**: Identidad comercial para comprobantes, marco regulatorio (usura), política de mora, carga automática de festivos de Colombia (Ley Emiliani + Semana Santa) y gestión de equipo/roles.
+- **Configuración (`/configuracion`)**: Identidad comercial para comprobantes, marco regulatorio opcional, política de mora, carga automática de festivos de Colombia (Ley Emiliani + Semana Santa) y gestión de equipo/roles.
+- **Portal de Consulta Pública (`/consulta`)**: Apartado público sin inicio de sesión donde el cliente ingresa su número de documento para revisar su saldo pendiente, próxima cuota y plan de pagos (protegido contra enumeración por límite de tasa y sin exponer datos sensibles).
 
 ## Instalación
 

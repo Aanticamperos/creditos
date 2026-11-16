@@ -2,10 +2,20 @@ import { createServerClient } from '@supabase/ssr';
 import { NextResponse, type NextRequest } from 'next/server';
 import { getSupabaseConfig } from '@/lib/supabase/config';
 
-/** Refreshes Supabase auth cookies and protects every application route and API endpoint. */
+const PUBLIC_PATHS = ['/login', '/consulta', '/api/public/consulta'];
+
+function isPublicPath(pathname: string): boolean {
+  return PUBLIC_PATHS.some((p) => pathname === p || pathname.startsWith(`${p}/`));
+}
+
+/** Refreshes Supabase auth cookies and protects every private application route and API endpoint. */
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
   const { url, anonKey, configured } = getSupabaseConfig();
+
+  if (isPublicPath(pathname) && pathname !== '/login') {
+    return NextResponse.next();
+  }
 
   if (!configured) {
     if (pathname.startsWith('/api/')) {
