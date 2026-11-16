@@ -1,0 +1,2 @@
+-- Create the first user in Supabase Authentication, then promote it using its UUID:
+-- insert into public.profiles (id,full_name,role) values ('AUTH_USER_UUID','Administrador','admin');
