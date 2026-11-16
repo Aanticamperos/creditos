@@ -1,5 +1,42 @@
--- Additional RLS policies & performance indexes for full Nexo Crédito operations.
+-- Hardened RLS policies, indexes, and fixed payment RPC for Nexo Crédito.
 -- Safe to execute idempotently after 001_initial.sql and 002_create_loan.sql.
+
+-- Tighten initial read/insert policies so only active staff in public.profiles have direct DB access.
+drop policy if exists "authenticated read customers" on public.customers;
+create policy "authenticated read customers" on public.customers
+  for select to authenticated using (public.current_role() is not null);
+
+drop policy if exists "staff create customers" on public.customers;
+create policy "staff create customers" on public.customers
+  for insert to authenticated with check (public.current_role() is not null and created_by = auth.uid());
+
+drop policy if exists "staff read finance" on public.loans;
+create policy "staff read finance" on public.loans
+  for select to authenticated using (public.current_role() is not null);
+
+drop policy if exists "staff create own loans" on public.loans;
+create policy "staff create own loans" on public.loans
+  for insert to authenticated with check (public.current_role() is not null and created_by = auth.uid());
+
+drop policy if exists "staff read installments" on public.loan_installments;
+create policy "staff read installments" on public.loan_installments
+  for select to authenticated using (public.current_role() is not null);
+
+drop policy if exists "staff read payments" on public.payments;
+create policy "staff read payments" on public.payments
+  for select to authenticated using (public.current_role() is not null);
+
+drop policy if exists "staff read allocations" on public.payment_allocations;
+create policy "staff read allocations" on public.payment_allocations
+  for select to authenticated using (public.current_role() is not null);
+
+drop policy if exists "staff read penalties" on public.late_penalties;
+create policy "staff read penalties" on public.late_penalties
+  for select to authenticated using (public.current_role() is not null);
+
+drop policy if exists "holiday read" on public.business_holidays;
+create policy "holiday read" on public.business_holidays
+  for select to authenticated using (public.current_role() is not null);
 
 do $$
 begin
@@ -21,14 +58,14 @@ begin
     select 1 from pg_policies where schemaname = 'public' and tablename = 'app_settings' and policyname = 'authenticated read settings'
   ) then
     create policy "authenticated read settings" on public.app_settings
-      for select to authenticated using (true);
+      for select to authenticated using (public.current_role() is not null);
   end if;
 
   if not exists (
     select 1 from pg_policies where schemaname = 'public' and tablename = 'financial_adjustments' and policyname = 'authenticated read adjustments'
   ) then
     create policy "authenticated read adjustments" on public.financial_adjustments
-      for select to authenticated using (true);
+      for select to authenticated using (public.current_role() is not null);
   end if;
 
   if not exists (
@@ -74,3 +111,6 @@ begin
     values(auth.uid(),'payment_registered','payment',pid,jsonb_build_object('amount',p_amount));
   return pid;
 end $$;
+
+revoke all on function public.register_payment(uuid,bigint,public.payment_method,text,text,jsonb,uuid) from public;
+grant execute on function public.register_payment(uuid,bigint,public.payment_method,text,text,jsonb,uuid) to authenticated;
