@@ -1,6 +1,55 @@
 export type Frequency = 'daily' | 'weekly' | 'biweekly' | 'monthly';
+export type BillingMode = 'fixed_installments' | 'monthly_interest_only';
 export type LoanStatus = 'draft' | 'active' | 'finished' | 'archived' | 'blocked';
 export type InstallmentStatus = 'pending' | 'partial' | 'paid' | 'overdue' | 'overdue_partial';
+
+export interface LoanTermsSnapshot {
+  billing_mode?: BillingMode;
+  initial_capital?: number;
+  current_capital?: number;
+  capital_paid?: number;
+  capital_added?: number;
+  billing_day?: number;
+  next_cycle_date?: string;
+  [key: string]: unknown;
+}
+
+export function getLoanBillingMode(termsSnapshot: unknown): BillingMode {
+  if (
+    termsSnapshot &&
+    typeof termsSnapshot === 'object' &&
+    (termsSnapshot as LoanTermsSnapshot).billing_mode === 'monthly_interest_only'
+  ) {
+    return 'monthly_interest_only';
+  }
+  return 'fixed_installments';
+}
+
+export function getLoanCurrentCapital(loan: {
+  capital: number;
+  status: string;
+  terms_snapshot?: unknown;
+}): number {
+  if (getLoanBillingMode(loan.terms_snapshot) !== 'monthly_interest_only') return 0;
+  if (loan.status === 'draft' || loan.status === 'archived' || loan.status === 'finished') {
+    return 0;
+  }
+  const snap = loan.terms_snapshot as LoanTermsSnapshot | undefined;
+  if (typeof snap?.current_capital === 'number') {
+    return Math.max(0, Math.round(snap.current_capital));
+  }
+  return Number(loan.capital);
+}
+
+/** Shifts a date forward if it falls on Sunday or a business holiday. */
+export function shiftToWorkingDay(isoDate: string, holidays: string[] = []): string {
+  const h = new Set(holidays);
+  let d = new Date(`${isoDate}T12:00:00Z`);
+  while (d.getUTCDay() === 0 || h.has(d.toISOString().slice(0, 10))) {
+    d = new Date(d.getTime() + 86_400_000);
+  }
+  return d.toISOString().slice(0, 10);
+}
 
 export interface PenaltyPolicy {
   enabled: boolean;

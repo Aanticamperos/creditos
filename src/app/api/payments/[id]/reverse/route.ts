@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from 'next/server';
 import { requireAdmin } from '@/lib/auth';
 import { writeAuditLog } from '@/lib/audit';
 import { todayBogota } from '@/lib/dates';
+import type { LoanTermsSnapshot } from '@/lib/financial';
 import { firstZodError, paymentReverseSchema } from '@/lib/validation';
 
 export async function POST(
@@ -32,10 +33,14 @@ export async function POST(
     return NextResponse.json({ error: 'Este pago ya fue reversado anteriormente.' }, { status: 409 });
   }
 
-  const { data: allocations } = await adminClient
-    .from('payment_allocations')
-    .select('*')
-    .eq('payment_id', id);
+  const [{ data: allocations }, { data: capAdjustments }] = await Promise.all([
+    adminClient.from('payment_allocations').select('*').eq('payment_id', id),
+    adminClient
+      .from('financial_adjustments')
+      .select('*')
+      .eq('adjustment_type', 'capital_payment')
+      .contains('original_data', { payment_id: id }),
+  ]);
 
   const nowIso = new Date().toISOString();
   const { error: revErr } = await adminClient
@@ -98,6 +103,30 @@ export async function POST(
           .maybeSingle();
         if (pInst) touchedLoans.add(pInst.loan_id);
       }
+    }
+  }
+
+  for (const adj of capAdjustments ?? []) {
+    touchedLoans.add(adj.loan_id);
+    const { data: loan } = await adminClient
+      .from('loans')
+      .select('id, capital, terms_snapshot')
+      .eq('id', adj.loan_id)
+      .maybeSingle();
+    if (loan) {
+      const snap = (loan.terms_snapshot ?? {}) as LoanTermsSnapshot;
+      const restoredCapital = Number(snap.current_capital ?? 0) + Number(adj.amount);
+      const restoredPaid = Math.max(0, Number(snap.capital_paid ?? 0) - Number(adj.amount));
+      await adminClient
+        .from('loans')
+        .update({
+          terms_snapshot: {
+            ...snap,
+            current_capital: restoredCapital,
+            capital_paid: restoredPaid,
+          },
+        })
+        .eq('id', loan.id);
     }
   }
 

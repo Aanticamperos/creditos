@@ -5,7 +5,10 @@ import {
   computeEffectiveInstallmentStatus,
   computePenaltyDetails,
   FREQUENCY_LABELS,
+  getLoanBillingMode,
+  getLoanCurrentCapital,
   type Frequency,
+  type LoanTermsSnapshot,
 } from '@/lib/financial';
 import { loadAppSettings } from '@/lib/settings';
 import { createAdminSupabaseClient } from '@/lib/supabase/admin';
@@ -100,7 +103,7 @@ export async function POST(request: NextRequest) {
     adminClient
       .from('loans')
       .select(
-        'id, capital, contractual_total, frequency, installments_count, disbursement_date, first_payment_date, status, created_at',
+        'id, capital, interest_rate, contractual_total, frequency, installments_count, disbursement_date, first_payment_date, status, terms_snapshot, created_at',
       )
       .eq('customer_id', customer.id)
       .in('status', ['active', 'blocked', 'finished'])
@@ -230,21 +233,34 @@ export async function POST(request: NextRequest) {
       };
     });
 
+    const billingMode = getLoanBillingMode(loan.terms_snapshot);
+    const currentCapital = getLoanCurrentCapital(loan);
+    const capitalPaid =
+      billingMode === 'monthly_interest_only'
+        ? Number((loan.terms_snapshot as LoanTermsSnapshot | null)?.capital_paid ?? 0)
+        : 0;
+
     if (loan.status !== 'finished') {
-      globalPendingBalance += loanRemaining;
+      globalPendingBalance += loanRemaining + currentCapital;
       globalPenaltiesPending += loanRecordedPenaltiesRem;
       globalOverdueCount += loanOverdueCount;
     }
-    globalPaidTotal += loanPaid;
+    globalPaidTotal += loanPaid + capitalPaid;
 
     return {
       code: loan.id.slice(0, 8).toUpperCase(),
-      frequency_label: FREQUENCY_LABELS[loan.frequency as Frequency] ?? loan.frequency,
+      billing_mode: billingMode,
+      current_capital: currentCapital,
+      interest_rate: Number(loan.interest_rate),
+      frequency_label:
+        billingMode === 'monthly_interest_only'
+          ? 'Mensual (solo interés sobre capital)'
+          : FREQUENCY_LABELS[loan.frequency as Frequency] ?? loan.frequency,
       installments_count: loan.installments_count,
       disbursement_date: loan.disbursement_date,
       status: loan.status,
       contractual_total: Number(loan.contractual_total),
-      paid_total: loanPaid,
+      paid_total: loanPaid + capitalPaid,
       remaining_installments: loanRemaining,
       recorded_penalties_remaining: loanRecordedPenaltiesRem,
       estimated_penalties_remaining: loanEstimatedPenaltiesRem,

@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { diffDaysISO, todayBogota } from '@/lib/dates';
-import { computeEffectiveInstallmentStatus } from '@/lib/financial';
+import { computeEffectiveInstallmentStatus, getLoanCurrentCapital } from '@/lib/financial';
 
 export async function GET(request: NextRequest) {
   const auth = await requireAuth();
@@ -146,6 +146,15 @@ export async function GET(request: NextRequest) {
       });
     } else {
       agingBuckets.al_dia += rem;
+    }
+  }
+
+  for (const loan of loans ?? []) {
+    if (loan.status !== 'active' && loan.status !== 'blocked') continue;
+    const revCap = getLoanCurrentCapital(loan);
+    if (revCap > 0) {
+      pendingInstallmentsBalance += revCap;
+      agingBuckets.al_dia += revCap;
     }
   }
 

@@ -7,12 +7,14 @@ import { AppShell, useSessionInfo } from '@/components/app-shell';
 import { AlertIcon, PlusIcon, SearchIcon } from '@/components/icons';
 import { LoanStatusBadge } from '@/components/status-badge';
 import { useToast } from '@/components/toast';
-import { formatDateCO, todayBogota } from '@/lib/dates';
+import { formatDateCO, nextCalendarMonthDate, todayBogota } from '@/lib/dates';
 import {
   computeEquivalentRates,
   FREQUENCY_LABELS,
   quote,
   schedule,
+  shiftToWorkingDay,
+  type BillingMode,
   type Frequency,
 } from '@/lib/financial';
 import { formatCOP } from '@/lib/money';
@@ -38,8 +40,11 @@ interface LoanItem {
     phone: string;
   } | null;
   total_paid: number;
+  billing_mode?: BillingMode;
+  current_capital?: number;
   installments_remaining: number;
   penalties_remaining: number;
+  total_remaining?: number;
   overdue_count: number;
   paid_count: number;
   next_due_date: string | null;
@@ -75,6 +80,7 @@ function PrestamosContent() {
 
   // New Loan Form State
   const [customerId, setCustomerId] = useState(searchParams.get('customerId') ?? '');
+  const [billingMode, setBillingMode] = useState<BillingMode>('fixed_installments');
   const [capital, setCapital] = useState(300_000);
   const [rateInput, setRateInput] = useState('');
   const [frequency, setFrequency] = useState<Frequency>('daily');
@@ -136,16 +142,44 @@ function PrestamosContent() {
   const parsedRate = rateInput.trim() === '' ? 0 : Number(rateInput);
   const safeCapital = Number.isInteger(capital) && capital > 0 ? capital : 1;
   const safeRate = Number.isFinite(parsedRate) && parsedRate >= 0 ? parsedRate : 0;
-  const safeCount = Number.isInteger(count) && count >= 1 ? Math.min(count, 365) : 1;
+  const isMonthlyInterestOnly = billingMode === 'monthly_interest_only';
+  const safeCount = isMonthlyInterestOnly
+    ? 1
+    : Number.isInteger(count) && count >= 1
+      ? Math.min(count, 365)
+      : 1;
 
-  const q = useMemo(() => quote(safeCapital, safeRate, safeCount), [safeCapital, safeRate, safeCount]);
-  const dates = useMemo(
-    () => (firstPaymentDate ? schedule(firstPaymentDate, frequency, safeCount, holidays) : []),
-    [firstPaymentDate, frequency, safeCount, holidays],
-  );
+  const q = useMemo(() => {
+    if (isMonthlyInterestOnly) {
+      const interest = Math.round((safeCapital * safeRate) / 100);
+      return { interest, total: safeCapital + interest, values: [interest] };
+    }
+    return quote(safeCapital, safeRate, safeCount);
+  }, [isMonthlyInterestOnly, safeCapital, safeRate, safeCount]);
+
+  const dates = useMemo(() => {
+    if (!firstPaymentDate) return [];
+    if (isMonthlyInterestOnly) {
+      const billingDay = Number(firstPaymentDate.slice(8, 10)) || 1;
+      const preview: { scheduled: string; due: string }[] = [];
+      let sched = firstPaymentDate;
+      for (let i = 0; i < 3; i++) {
+        preview.push({ scheduled: sched, due: shiftToWorkingDay(sched, holidays) });
+        sched = nextCalendarMonthDate(sched, billingDay);
+      }
+      return preview;
+    }
+    return schedule(firstPaymentDate, frequency, safeCount, holidays);
+  }, [firstPaymentDate, frequency, holidays, isMonthlyInterestOnly, safeCount]);
+
   const equivalent = useMemo(
-    () => computeEquivalentRates(safeRate, frequency, safeCount),
-    [safeRate, frequency, safeCount],
+    () =>
+      computeEquivalentRates(
+        safeRate,
+        isMonthlyInterestOnly ? 'monthly' : frequency,
+        isMonthlyInterestOnly ? 1 : safeCount,
+      ),
+    [frequency, isMonthlyInterestOnly, safeCount, safeRate],
   );
 
   const reg = settings.regulatory_policy;
@@ -163,6 +197,10 @@ function PrestamosContent() {
       setFormError('Ingresa la tasa de interés (%) que deseas aplicar a este préstamo.');
       return;
     }
+    if (isMonthlyInterestOnly && parsedRate <= 0) {
+      setFormError('La modalidad mensual solo interés requiere una tasa mayor a 0%.');
+      return;
+    }
     setSaving(true);
     try {
       const res = await fetch('/api/loans', {
@@ -172,7 +210,8 @@ function PrestamosContent() {
           customer_id: customerId,
           capital: safeCapital,
           interest_rate: safeRate,
-          frequency,
+          frequency: isMonthlyInterestOnly ? 'monthly' : frequency,
+          billing_mode: billingMode,
           installments_count: safeCount,
           disbursement_date: disbursementDate,
           first_payment_date: firstPaymentDate,
@@ -299,10 +338,15 @@ function PrestamosContent() {
                         </td>
                         <td className="px-4 py-3 text-xs text-slate-600">
                           <p className="font-medium text-slate-800">
-                            {FREQUENCY_LABELS[loan.frequency] ?? loan.frequency} ·{' '}
-                            {loan.installments_count} cuotas
+                            {loan.billing_mode === 'monthly_interest_only'
+                              ? 'Mensual solo interés'
+                              : `${FREQUENCY_LABELS[loan.frequency] ?? loan.frequency} · ${loan.installments_count} cuotas`}
                           </p>
-                          <p>Interés: {loan.interest_rate}%</p>
+                          <p>
+                            Interés: {loan.interest_rate}%
+                            {loan.billing_mode === 'monthly_interest_only' &&
+                              ` · Cap. vivo ${formatCOP(loan.current_capital ?? 0)}`}
+                          </p>
                         </td>
                         <td className="tabular-nums px-4 py-3 text-right text-slate-700">
                           {formatCOP(loan.capital)}
@@ -311,24 +355,33 @@ function PrestamosContent() {
                           {formatCOP(loan.contractual_total)}
                         </td>
                         <td className="px-4 py-3">
-                          <div className="w-28">
-                            <div className="flex justify-between text-[11px] text-slate-500">
-                              <span>
-                                {loan.paid_count}/{loan.installments_count}c
-                              </span>
-                              <span>{pct}%</span>
+                          {loan.billing_mode === 'monthly_interest_only' ? (
+                            <span className="inline-block rounded-full bg-amber-50 px-2.5 py-0.5 text-[11px] font-semibold text-amber-800">
+                              Ciclo mensual
+                            </span>
+                          ) : (
+                            <div className="w-28">
+                              <div className="flex justify-between text-[11px] text-slate-500">
+                                <span>
+                                  {loan.paid_count}/{loan.installments_count}c
+                                </span>
+                                <span>{pct}%</span>
+                              </div>
+                              <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-slate-100">
+                                <div
+                                  className="h-full rounded-full bg-emerald-500"
+                                  style={{ width: `${pct}%` }}
+                                />
+                              </div>
                             </div>
-                            <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-slate-100">
-                              <div
-                                className="h-full rounded-full bg-emerald-500"
-                                style={{ width: `${pct}%` }}
-                              />
-                            </div>
-                          </div>
+                          )}
                         </td>
                         <td className="tabular-nums px-4 py-3 text-right">
                           <p className="font-bold text-slate-900">
-                            {formatCOP(loan.installments_remaining + loan.penalties_remaining)}
+                            {formatCOP(
+                              loan.total_remaining ??
+                                loan.installments_remaining + loan.penalties_remaining,
+                            )}
                           </p>
                           {loan.overdue_count > 0 && (
                             <p className="text-[11px] font-semibold text-rose-600">
@@ -453,30 +506,53 @@ function PrestamosContent() {
                   </span>
                 </label>
 
-                <label>
-                  Modalidad de cobro
+                <label className="sm:col-span-2">
+                  Esquema del crédito
                   <select
-                    value={frequency}
-                    onChange={(e) => setFrequency(e.target.value as Frequency)}
+                    value={billingMode}
+                    onChange={(e) => {
+                      const next = e.target.value as BillingMode;
+                      setBillingMode(next);
+                      if (next === 'monthly_interest_only') setFrequency('monthly');
+                    }}
                   >
-                    <option value="daily">Diaria (lunes a sábado)</option>
-                    <option value="weekly">Semanal (cada 7 días)</option>
-                    <option value="biweekly">Quincenal (cada 15 días)</option>
-                    <option value="monthly">Mensual (cada 30 días)</option>
+                    <option value="fixed_installments">
+                      Cuotas fijas cerradas (capital + interés dividido en N cuotas)
+                    </option>
+                    <option value="monthly_interest_only">
+                      Mensual solo interés sobre capital (abierto con abonos a capital y retanqueos)
+                    </option>
                   </select>
                 </label>
 
-                <label>
-                  Número de cuotas
-                  <input
-                    required
-                    type="number"
-                    min="1"
-                    max="365"
-                    value={count || ''}
-                    onChange={(e) => setCount(Math.max(1, Math.round(Number(e.target.value))))}
-                  />
-                </label>
+                {!isMonthlyInterestOnly && (
+                  <>
+                    <label>
+                      Modalidad de cobro
+                      <select
+                        value={frequency}
+                        onChange={(e) => setFrequency(e.target.value as Frequency)}
+                      >
+                        <option value="daily">Diaria (lunes a sábado)</option>
+                        <option value="weekly">Semanal (cada 7 días)</option>
+                        <option value="biweekly">Quincenal (cada 15 días)</option>
+                        <option value="monthly">Mensual (cada 30 días)</option>
+                      </select>
+                    </label>
+
+                    <label>
+                      Número de cuotas
+                      <input
+                        required
+                        type="number"
+                        min="1"
+                        max="365"
+                        value={count || ''}
+                        onChange={(e) => setCount(Math.max(1, Math.round(Number(e.target.value))))}
+                      />
+                    </label>
+                  </>
+                )}
 
                 <label>
                   Fecha de desembolso
@@ -585,17 +661,26 @@ function PrestamosContent() {
                     <dd className="tabular-nums font-medium">{formatCOP(q.interest)}</dd>
                   </div>
                   <div className="flex justify-between">
-                    <dt className="text-slate-400">Cuota base</dt>
+                    <dt className="text-slate-400">
+                      {isMonthlyInterestOnly ? 'Cuota de interés mensual' : 'Cuota base'}
+                    </dt>
                     <dd className="tabular-nums font-medium">
                       {formatCOP(q.values[0] ?? 0)}
-                      {q.values.length > 1 &&
+                      {!isMonthlyInterestOnly &&
+                        q.values.length > 1 &&
                         q.values[q.values.length - 1] !== q.values[0] &&
                         ` (última ${formatCOP(q.values[q.values.length - 1])})`}
                     </dd>
                   </div>
                   <div className="flex justify-between">
-                    <dt className="text-slate-400">Duración aprox.</dt>
-                    <dd>{equivalent.estimatedDays} días</dd>
+                    <dt className="text-slate-400">
+                      {isMonthlyInterestOnly ? 'Esquema' : 'Duración aprox.'}
+                    </dt>
+                    <dd>
+                      {isMonthlyInterestOnly
+                        ? 'Mensual renovable'
+                        : `${equivalent.estimatedDays} días`}
+                    </dd>
                   </div>
                   <div className="flex justify-between">
                     <dt className="text-slate-400">Tasa equiv. mensual / EA</dt>
@@ -630,7 +715,9 @@ function PrestamosContent() {
             <div className="flex items-center justify-between">
               <div>
                 <h2 className="text-base font-bold text-slate-900">
-                  Calendario proyectado ({dates.length} cuotas)
+                  {isMonthlyInterestOnly
+                    ? 'Proyección próximos ciclos mensuales (solo interés)'
+                    : `Calendario proyectado (${dates.length} cuotas)`}
                 </h2>
                 <p className="text-xs text-slate-500">
                   Las fechas que caen en domingo o festivo se ajustan automáticamente al siguiente día
@@ -664,7 +751,9 @@ function PrestamosContent() {
                           )}
                         </td>
                         <td className="tabular-nums py-2 pl-3 text-right font-semibold text-slate-900">
-                          {formatCOP(q.values[i] ?? 0)}
+                          {formatCOP(
+                            isMonthlyInterestOnly ? (q.values[0] ?? 0) : (q.values[i] ?? 0),
+                          )}
                         </td>
                       </tr>
                     );

@@ -87,6 +87,9 @@ interface LoanDetailPayload {
     created_at: string;
   }[];
   summary: {
+    billingMode?: 'fixed_installments' | 'monthly_interest_only';
+    currentCapital?: number;
+    capitalPaid?: number;
     totalPaid: number;
     remainingInstallments: number;
     recordedPenaltiesPending: number;
@@ -116,6 +119,11 @@ function LoanDetailContent() {
   const [adjPenId, setAdjPenId] = useState('');
   const [adjAmount, setAdjAmount] = useState(0);
   const [adjReason, setAdjReason] = useState('');
+
+  // Add capital (retanqueo) modal (admin only for monthly_interest_only)
+  const [capOpen, setCapOpen] = useState(false);
+  const [capAmount, setCapAmount] = useState('');
+  const [capReason, setCapReason] = useState('');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -225,6 +233,60 @@ function LoanDetailContent() {
       setAdjOpen(false);
       setAdjReason('');
       setAdjAmount(0);
+      await load();
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Error', 'error');
+    } finally {
+      setBusyAction(false);
+    }
+  }
+
+  async function submitAddCapital(e: FormEvent) {
+    e.preventDefault();
+    const amt = Math.round(Number(capAmount) || 0);
+    if (amt <= 0) {
+      notify('Ingresa un valor positivo de capital.', 'error');
+      return;
+    }
+    setBusyAction(true);
+    try {
+      const res = await fetch(`/api/loans/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'add_capital',
+          amount: amt,
+          reason: capReason,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error ?? 'Error agregando capital');
+      notify(`Capital ampliado en ${formatCOP(amt)}.`, 'success');
+      setCapOpen(false);
+      setCapAmount('');
+      setCapReason('');
+      await load();
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Error', 'error');
+    } finally {
+      setBusyAction(false);
+    }
+  }
+
+  async function handleCapitalizeInterest(inst: InstallmentRow) {
+    setBusyAction(true);
+    try {
+      const res = await fetch(`/api/loans/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'capitalize_interest',
+          installment_id: inst.id,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error ?? 'Error capitalizando interés');
+      notify(`Interés de cuota #${inst.installment_number} sumado al capital.`, 'success');
       await load();
     } catch (err) {
       notify(err instanceof Error ? err.message : 'Error', 'error');
@@ -374,6 +436,17 @@ function LoanDetailContent() {
                     Reactivar
                   </button>
                 )}
+                {isAdmin &&
+                  data.summary.billingMode === 'monthly_interest_only' &&
+                  (loan.status === 'active' || loan.status === 'blocked') && (
+                    <button
+                      type="button"
+                      onClick={() => setCapOpen(true)}
+                      className="rounded-lg bg-emerald-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-800"
+                    >
+                      + Agregar capital
+                    </button>
+                  )}
                 {isAdmin && (loan.status === 'active' || loan.status === 'blocked') && (
                   <button
                     type="button"
@@ -398,21 +471,42 @@ function LoanDetailContent() {
 
             <div className="mt-5 grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
               <div>
-                <p className="text-xs text-slate-500">Capital prestado</p>
-                <p className="tabular-nums mt-1 text-lg font-bold text-slate-900">
-                  {formatCOP(loan.capital)}
+                <p className="text-xs text-slate-500">
+                  {data.summary.billingMode === 'monthly_interest_only'
+                    ? 'Capital vigente'
+                    : 'Capital prestado'}
                 </p>
+                <p className="tabular-nums mt-1 text-lg font-bold text-slate-900">
+                  {formatCOP(
+                    data.summary.billingMode === 'monthly_interest_only'
+                      ? (data.summary.currentCapital ?? loan.capital)
+                      : loan.capital,
+                  )}
+                </p>
+                {data.summary.billingMode === 'monthly_interest_only' && (
+                  <p className="text-[11px] text-slate-400">
+                    Desembolsado total: {formatCOP(loan.capital)}
+                  </p>
+                )}
               </div>
               <div>
-                <p className="text-xs text-slate-500">Interés ({loan.interest_rate}%)</p>
+                <p className="text-xs text-slate-500">
+                  Interés ({loan.interest_rate}%{data.summary.billingMode === 'monthly_interest_only' ? '/mes' : ''})
+                </p>
                 <p className="tabular-nums mt-1 text-lg font-bold text-slate-900">
                   {formatCOP(loan.contractual_interest)}
                 </p>
               </div>
               <div>
-                <p className="text-xs text-slate-500">Total pactado</p>
+                <p className="text-xs text-slate-500">
+                  {data.summary.billingMode === 'monthly_interest_only'
+                    ? 'Esquema'
+                    : 'Total pactado'}
+                </p>
                 <p className="tabular-nums mt-1 text-lg font-bold text-slate-900">
-                  {formatCOP(loan.contractual_total)}
+                  {data.summary.billingMode === 'monthly_interest_only'
+                    ? 'Solo interés'
+                    : formatCOP(loan.contractual_total)}
                 </p>
               </div>
               <div>
@@ -422,7 +516,11 @@ function LoanDetailContent() {
                 </p>
               </div>
               <div>
-                <p className="text-xs text-slate-500">Saldo pendiente (+mora reg.)</p>
+                <p className="text-xs text-slate-500">
+                  {data.summary.billingMode === 'monthly_interest_only'
+                    ? 'Total para liquidar hoy'
+                    : 'Saldo pendiente (+mora reg.)'}
+                </p>
                 <p className="tabular-nums mt-1 text-lg font-extrabold text-slate-900">
                   {formatCOP(data.summary.totalRemaining)}
                 </p>
@@ -518,14 +616,26 @@ function LoanDetailContent() {
                       {isAdmin && (
                         <td className="no-print py-2.5 pl-3 text-right">
                           {inst.effective_status !== 'paid' && (
-                            <button
-                              type="button"
-                              disabled={busyAction}
-                              onClick={() => toggleFreeze(inst)}
-                              className="rounded-lg border border-slate-200 px-2 py-1 text-[11px] font-medium text-slate-600 hover:bg-slate-50"
-                            >
-                              {inst.penalty_frozen ? 'Reactivar mora' : 'Congelar mora'}
-                            </button>
+                            <div className="inline-flex gap-1">
+                              <button
+                                type="button"
+                                disabled={busyAction}
+                                onClick={() => toggleFreeze(inst)}
+                                className="rounded-lg border border-slate-200 px-2 py-1 text-[11px] font-medium text-slate-600 hover:bg-slate-50"
+                              >
+                                {inst.penalty_frozen ? 'Reactivar mora' : 'Congelar mora'}
+                              </button>
+                              {data.summary.billingMode === 'monthly_interest_only' && (
+                                <button
+                                  type="button"
+                                  disabled={busyAction}
+                                  onClick={() => handleCapitalizeInterest(inst)}
+                                  className="rounded-lg border border-amber-200 bg-amber-50 px-2 py-1 text-[11px] font-medium text-amber-800 hover:bg-amber-100"
+                                >
+                                  Capitalizar
+                                </button>
+                              )}
+                            </div>
                           )}
                         </td>
                       )}
@@ -616,6 +726,76 @@ function LoanDetailContent() {
               </div>
             </section>
           </div>
+
+          {/* Add Capital Modal */}
+          {capOpen && (
+            <div
+              className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-xs"
+              role="dialog"
+              aria-modal="true"
+            >
+              <form
+                onSubmit={submitAddCapital}
+                className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl"
+              >
+                <div className="mb-4 flex items-center justify-between border-b border-slate-100 pb-3">
+                  <h3 className="text-base font-bold text-slate-900">
+                    Agregar nuevo capital (Retanqueo)
+                  </h3>
+                  <button
+                    type="button"
+                    onClick={() => setCapOpen(false)}
+                    className="rounded-lg p-1 text-slate-400 hover:bg-slate-100"
+                  >
+                    <CloseIcon className="h-4 w-4" />
+                  </button>
+                </div>
+                <p className="mb-4 text-xs text-slate-600">
+                  El nuevo capital se suma al saldo vigente ({formatCOP(data.summary.currentCapital ?? loan.capital)}) y ajusta automáticamente el interés ({loan.interest_rate}%/mes) de los próximos ciclos pendientes.
+                </p>
+                <div className="space-y-3.5">
+                  <label>
+                    Monto adicional entregado (COP)
+                    <input
+                      required
+                      type="number"
+                      min="1000"
+                      step="1000"
+                      value={capAmount}
+                      onChange={(e) => setCapAmount(e.target.value)}
+                      placeholder="Ej. 400000"
+                    />
+                  </label>
+                  <label>
+                    Motivo / Nota (obligatorio)
+                    <input
+                      required
+                      minLength={3}
+                      value={capReason}
+                      onChange={(e) => setCapReason(e.target.value)}
+                      placeholder="Ej. Ampliación de capital solicitada por el cliente"
+                    />
+                  </label>
+                </div>
+                <div className="mt-5 flex justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setCapOpen(false)}
+                    className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-semibold text-slate-700"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={busyAction}
+                    className="rounded-xl bg-emerald-600 px-4 py-2 text-xs font-semibold text-white hover:bg-emerald-700 disabled:bg-slate-300"
+                  >
+                    {busyAction ? 'Guardando…' : 'Confirmar retanqueo'}
+                  </button>
+                </div>
+              </form>
+            </div>
+          )}
 
           {/* Adjustment Modal */}
           {adjOpen && (

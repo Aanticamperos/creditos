@@ -2,7 +2,7 @@ import { NextResponse, type NextRequest } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { writeAuditLog } from '@/lib/audit';
 import { todayBogota } from '@/lib/dates';
-import { computeEffectiveInstallmentStatus } from '@/lib/financial';
+import { computeEffectiveInstallmentStatus, getLoanCurrentCapital } from '@/lib/financial';
 import { customerCreateSchema, firstZodError } from '@/lib/validation';
 
 export async function GET(request: NextRequest) {
@@ -28,7 +28,7 @@ export async function GET(request: NextRequest) {
       query,
       adminClient
         .from('loans')
-        .select('id, customer_id, status, capital, contractual_total')
+        .select('id, customer_id, status, capital, contractual_total, terms_snapshot')
         .neq('status', 'archived'),
       adminClient
         .from('loan_installments')
@@ -63,6 +63,7 @@ export async function GET(request: NextRequest) {
     if (loan.status === 'active' || loan.status === 'blocked') {
       entry.active_loans += 1;
     }
+    entry.pending_balance += getLoanCurrentCapital(loan);
     summaryByCustomer.set(loan.customer_id, entry);
   }
 

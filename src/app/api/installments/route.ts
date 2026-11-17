@@ -4,6 +4,8 @@ import { todayBogota } from '@/lib/dates';
 import {
   computeEffectiveInstallmentStatus,
   computePenaltyDetails,
+  getLoanBillingMode,
+  getLoanCurrentCapital,
   type Frequency,
 } from '@/lib/financial';
 import { loadAppSettings } from '@/lib/settings';
@@ -20,7 +22,9 @@ export async function GET(request: NextRequest) {
 
   let loansQuery = adminClient
     .from('loans')
-    .select('id, customer_id, frequency, capital, contractual_total, status, installments_count')
+    .select(
+      'id, customer_id, frequency, capital, contractual_total, interest_rate, status, installments_count, terms_snapshot',
+    )
     .in('status', ['active', 'blocked']);
 
   if (customerId) {
@@ -43,7 +47,12 @@ export async function GET(request: NextRequest) {
 
   const loanIds = (loans ?? []).map((l) => l.id);
   if (loanIds.length === 0) {
-    return NextResponse.json({ installments: [], penalties: [], today: todayBogota() });
+    return NextResponse.json({
+      installments: [],
+      penalties: [],
+      open_capital_loans: [],
+      today: todayBogota(),
+    });
   }
 
   const { data: installments, error: instErr } = await adminClient
@@ -123,6 +132,7 @@ export async function GET(request: NextRequest) {
         loan: {
           id: loan.id,
           frequency: loan.frequency,
+          billing_mode: getLoanBillingMode(loan.terms_snapshot),
           installments_count: loan.installments_count,
           status: loan.status,
         },
@@ -166,9 +176,19 @@ export async function GET(request: NextRequest) {
       };
     });
 
+  const openCapitalLoans = (loans ?? [])
+    .filter((l) => getLoanBillingMode(l.terms_snapshot) === 'monthly_interest_only')
+    .map((l) => ({
+      loan_id: l.id,
+      interest_rate: Number(l.interest_rate),
+      current_capital: getLoanCurrentCapital(l),
+    }))
+    .filter((l) => l.current_capital > 0);
+
   return NextResponse.json({
     installments: enriched,
     penalties: openPenalties,
+    open_capital_loans: openCapitalLoans,
     today,
   });
 }

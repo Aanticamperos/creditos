@@ -5,8 +5,11 @@ import { todayBogota } from '@/lib/dates';
 import {
   computeEffectiveInstallmentStatus,
   computeEquivalentRates,
+  getLoanBillingMode,
+  getLoanCurrentCapital,
   quote,
   schedule,
+  shiftToWorkingDay,
   type Frequency,
 } from '@/lib/financial';
 import { loadAppSettings } from '@/lib/settings';
@@ -114,10 +117,25 @@ export async function GET(request: NextRequest) {
       paid_count: 0,
       next_due_date: null,
     };
+    const billingMode = getLoanBillingMode(loan.terms_snapshot);
+    const currentCapital = getLoanCurrentCapital(loan);
+    const capitalPaid =
+      billingMode === 'monthly_interest_only'
+        ? Number((loan.terms_snapshot as { capital_paid?: number } | null)?.capital_paid ?? 0)
+        : 0;
+
     return {
       ...loan,
+      billing_mode: billingMode,
+      current_capital: currentCapital,
+      total_paid: stats.total_paid + capitalPaid,
+      installments_remaining: stats.installments_remaining,
+      penalties_remaining: stats.penalties_remaining,
+      total_remaining: currentCapital + stats.installments_remaining + stats.penalties_remaining,
+      overdue_count: stats.overdue_count,
+      paid_count: stats.paid_count,
+      next_due_date: stats.next_due_date,
       customer: customerMap.get(loan.customer_id) ?? null,
-      ...stats,
     };
   });
 
@@ -153,23 +171,44 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  const isMonthlyInterestOnly = input.billing_mode === 'monthly_interest_only';
+  if (isMonthlyInterestOnly && input.interest_rate <= 0) {
+    return NextResponse.json(
+      { error: 'La modalidad mensual solo interés requiere una tasa mayor a 0%.' },
+      { status: 400 },
+    );
+  }
+
   const [{ data: holidays }, settings] = await Promise.all([
     adminClient.from('business_holidays').select('holiday_date'),
     loadAppSettings(adminClient),
   ]);
 
   const holidayDates = (holidays ?? []).map((h) => h.holiday_date as string);
-  const computedQuote = quote(input.capital, input.interest_rate, input.installments_count);
-  const computedSchedule = schedule(
-    input.first_payment_date,
-    input.frequency as Frequency,
-    input.installments_count,
-    holidayDates,
-  );
+  const effectiveFrequency: Frequency = isMonthlyInterestOnly ? 'monthly' : input.frequency;
+  const effectiveCount = isMonthlyInterestOnly ? 1 : input.installments_count;
+
+  const computedQuote = isMonthlyInterestOnly
+    ? {
+        interest: Math.max(1, Math.round((input.capital * input.interest_rate) / 100)),
+        total: input.capital + Math.max(1, Math.round((input.capital * input.interest_rate) / 100)),
+        values: [Math.max(1, Math.round((input.capital * input.interest_rate) / 100))],
+      }
+    : quote(input.capital, input.interest_rate, effectiveCount);
+
+  const computedSchedule = isMonthlyInterestOnly
+    ? [
+        {
+          scheduled: input.first_payment_date,
+          due: shiftToWorkingDay(input.first_payment_date, holidayDates),
+        },
+      ]
+    : schedule(input.first_payment_date, effectiveFrequency, effectiveCount, holidayDates);
+
   const equivalent = computeEquivalentRates(
     input.interest_rate,
-    input.frequency as Frequency,
-    input.installments_count,
+    effectiveFrequency,
+    isMonthlyInterestOnly ? 1 : effectiveCount,
   );
 
   const reg = settings.regulatory_policy;
@@ -202,17 +241,30 @@ export async function POST(request: NextRequest) {
     captured_at: new Date().toISOString(),
   };
 
-  const termsSnapshot = {
-    capital: input.capital,
-    interest_rate: input.interest_rate,
-    contractual_interest: computedQuote.interest,
-    contractual_total: computedQuote.total,
-    frequency: input.frequency,
-    installments_count: input.installments_count,
-    holidays_applied_count: holidayDates.length,
-    first_payment_date: input.first_payment_date,
-    last_due_date: computedSchedule[computedSchedule.length - 1]?.due ?? input.first_payment_date,
-  };
+  const termsSnapshot = isMonthlyInterestOnly
+    ? {
+        billing_mode: 'monthly_interest_only',
+        initial_capital: input.capital,
+        current_capital: input.capital,
+        capital_paid: 0,
+        capital_added: 0,
+        billing_day: Number(input.first_payment_date.slice(8, 10)),
+        next_cycle_date: input.first_payment_date,
+        holidays_applied_count: holidayDates.length,
+      }
+    : {
+        billing_mode: 'fixed_installments',
+        capital: input.capital,
+        interest_rate: input.interest_rate,
+        contractual_interest: computedQuote.interest,
+        contractual_total: computedQuote.total,
+        frequency: effectiveFrequency,
+        installments_count: effectiveCount,
+        holidays_applied_count: holidayDates.length,
+        first_payment_date: input.first_payment_date,
+        last_due_date:
+          computedSchedule[computedSchedule.length - 1]?.due ?? input.first_payment_date,
+      };
 
   const { data: loan, error: loanErr } = await adminClient
     .from('loans')
@@ -222,8 +274,8 @@ export async function POST(request: NextRequest) {
       interest_rate: input.interest_rate,
       contractual_interest: computedQuote.interest,
       contractual_total: computedQuote.total,
-      frequency: input.frequency,
-      installments_count: input.installments_count,
+      frequency: effectiveFrequency,
+      installments_count: effectiveCount,
       disbursement_date: input.disbursement_date,
       first_payment_date: input.first_payment_date,
       notes: input.notes ? input.notes : null,
@@ -274,8 +326,9 @@ export async function POST(request: NextRequest) {
       customer_id: input.customer_id,
       capital: input.capital,
       total: computedQuote.total,
-      installments_count: input.installments_count,
-      frequency: input.frequency,
+      installments_count: effectiveCount,
+      frequency: effectiveFrequency,
+      billing_mode: input.billing_mode,
       status: input.initial_status,
     },
   });

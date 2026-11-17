@@ -4,6 +4,7 @@ import { addDaysISO, todayBogota } from '@/lib/dates';
 import {
   computeEffectiveInstallmentStatus,
   computePenaltyDetails,
+  getLoanCurrentCapital,
   type Frequency,
 } from '@/lib/financial';
 import { loadAppSettings } from '@/lib/settings';
@@ -28,7 +29,9 @@ export async function GET() {
     adminClient.from('customers').select('id, first_names, last_names, phone, archived_at'),
     adminClient
       .from('loans')
-      .select('id, customer_id, capital, contractual_total, frequency, status, disbursement_date'),
+      .select(
+        'id, customer_id, capital, contractual_total, frequency, status, disbursement_date, terms_snapshot',
+      ),
     adminClient
       .from('loan_installments')
       .select('id, loan_id, installment_number, due_date, original_amount, paid_amount, penalty_frozen'),
@@ -49,6 +52,7 @@ export async function GET() {
   const activeCustomersCount = (customers ?? []).filter((c) => !c.archived_at).length;
   const activeLoans = (loans ?? []).filter((l) => l.status === 'active' || l.status === 'blocked');
   const activeCapital = activeLoans.reduce((s, l) => s + Number(l.capital), 0);
+  const activeRevolvingCapital = activeLoans.reduce((s, l) => s + getLoanCurrentCapital(l), 0);
 
   const penaltiesByInst = new Map<string, { total: number; paid: number }>();
   let pendingPenaltiesTotal = 0;
@@ -204,8 +208,8 @@ export async function GET() {
       activeCustomersCount,
       activeLoansCount: activeLoans.length,
       activeCapital,
-      pendingPortfolio: pendingInstallmentsBalance + pendingPenaltiesTotal,
-      pendingInstallmentsBalance,
+      pendingPortfolio: pendingInstallmentsBalance + activeRevolvingCapital + pendingPenaltiesTotal,
+      pendingInstallmentsBalance: pendingInstallmentsBalance + activeRevolvingCapital,
       pendingPenaltiesTotal,
       estimatedPendingPenalties,
       collectedToday,

@@ -21,6 +21,9 @@ interface PublicInstallment {
 
 interface PublicLoan {
   code: string;
+  billing_mode?: 'fixed_installments' | 'monthly_interest_only';
+  current_capital?: number;
+  interest_rate?: number;
   frequency_label: string;
   installments_count: number;
   disbursement_date: string;
@@ -303,10 +306,25 @@ export default function ConsultaPublicaPage() {
                       </p>
                     </div>
                     <div className="text-right">
-                      <p className="text-xs text-slate-500">Saldo del crédito</p>
-                      <p className="tabular-nums text-lg font-extrabold text-slate-900">
-                        {formatCOP(loan.remaining_installments + loan.recorded_penalties_remaining)}
+                      <p className="text-xs text-slate-500">
+                        {loan.billing_mode === 'monthly_interest_only'
+                          ? 'Total para liquidar (capital + interés)'
+                          : 'Saldo del crédito'}
                       </p>
+                      <p className="tabular-nums text-lg font-extrabold text-slate-900">
+                        {formatCOP(
+                          (loan.current_capital ?? 0) +
+                            loan.remaining_installments +
+                            loan.recorded_penalties_remaining,
+                        )}
+                      </p>
+                      {loan.billing_mode === 'monthly_interest_only' &&
+                        (loan.current_capital ?? 0) > 0 && (
+                          <p className="text-[11px] text-slate-500">
+                            Capital vivo: {formatCOP(loan.current_capital)} · Interés{' '}
+                            {loan.interest_rate}%/mes
+                          </p>
+                        )}
                     </div>
                   </div>
 

@@ -1,12 +1,16 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { writeAuditLog } from '@/lib/audit';
-import { todayBogota } from '@/lib/dates';
+import { nextCalendarMonthDate, todayBogota } from '@/lib/dates';
 import {
   computeEffectiveInstallmentStatus,
   computeEquivalentRates,
   computePenaltyDetails,
+  getLoanBillingMode,
+  getLoanCurrentCapital,
+  shiftToWorkingDay,
   type Frequency,
+  type LoanTermsSnapshot,
 } from '@/lib/financial';
 import { loadAppSettings } from '@/lib/settings';
 import { firstZodError, loanPatchSchema } from '@/lib/validation';
@@ -76,7 +80,13 @@ export async function GET(
   ]);
 
   const allocations = [...(allocByInstRes.data ?? []), ...(allocByPenRes.data ?? [])];
-  const paymentIds = Array.from(new Set(allocations.map((a) => a.payment_id)));
+  const capitalPaymentIds = (adjustments ?? [])
+    .filter((a) => a.adjustment_type === 'capital_payment' && a.original_data?.payment_id)
+    .map((a) => String(a.original_data.payment_id));
+  const paymentIds = Array.from(
+    new Set([...allocations.map((a) => a.payment_id), ...capitalPaymentIds]),
+  );
+
   const { data: payments } = paymentIds.length
     ? await adminClient
         .from('payments')
@@ -95,7 +105,7 @@ export async function GET(
     penaltiesByInst.set(p.installment_id, arr);
   }
 
-  let totalPaid = 0;
+  let totalPaidOnInstallments = 0;
   let remainingInstallments = 0;
   let recordedPenaltiesPending = 0;
   let estimatedPenaltiesPending = 0;
@@ -129,7 +139,7 @@ export async function GET(
       today,
     });
 
-    totalPaid += paid;
+    totalPaidOnInstallments += paid;
     remainingInstallments += remaining;
     recordedPenaltiesPending += recordedRemaining;
     const unrecordedExtra = Math.max(0, calc.totalPenaltyAmount - recordedTotal);
@@ -162,6 +172,11 @@ export async function GET(
     allocations: allocationsByPayment.get(p.id) ?? [],
   }));
 
+  const billingMode = getLoanBillingMode(loan.terms_snapshot);
+  const currentCapital = getLoanCurrentCapital(loan);
+  const snap = (loan.terms_snapshot ?? {}) as LoanTermsSnapshot;
+  const capitalPaid = billingMode === 'monthly_interest_only' ? Number(snap.capital_paid ?? 0) : 0;
+
   return NextResponse.json({
     loan,
     customer,
@@ -170,11 +185,14 @@ export async function GET(
     adjustments: adjustments ?? [],
     settings,
     summary: {
-      totalPaid,
+      billingMode,
+      currentCapital,
+      capitalPaid,
+      totalPaid: totalPaidOnInstallments + capitalPaid,
       remainingInstallments,
       recordedPenaltiesPending,
       estimatedPenaltiesPending,
-      totalRemaining: remainingInstallments + recordedPenaltiesPending,
+      totalRemaining: currentCapital + remainingInstallments + recordedPenaltiesPending,
       overdueCount,
       paidCount,
       installmentsCount: enrichedInstallments.length,
@@ -208,6 +226,7 @@ export async function PATCH(
   }
 
   const payload = parsed.data;
+  const billingMode = getLoanBillingMode(loan.terms_snapshot);
 
   if (payload.action === 'update_notes') {
     const { data: updated, error } = await adminClient
@@ -263,9 +282,232 @@ export async function PATCH(
     return NextResponse.json({ installment: inst });
   }
 
+  if (payload.action === 'add_capital') {
+    if (profile.role !== 'admin') {
+      return NextResponse.json(
+        { error: 'Solo un administrador puede ampliar capital (retanqueo).' },
+        { status: 403 },
+      );
+    }
+    if (billingMode !== 'monthly_interest_only') {
+      return NextResponse.json(
+        { error: 'La ampliación de capital aplica a préstamos en modalidad mensual solo interés.' },
+        { status: 400 },
+      );
+    }
+    if (loan.status !== 'active' && loan.status !== 'blocked') {
+      return NextResponse.json(
+        { error: 'Solo puedes agregar capital a préstamos activos.' },
+        { status: 409 },
+      );
+    }
+
+    const prevSnap = (loan.terms_snapshot ?? {}) as LoanTermsSnapshot;
+    const prevCurrent = Number(prevSnap.current_capital ?? loan.capital);
+    const newCurrent = prevCurrent + payload.amount;
+    const newTotalCapital = Number(loan.capital) + payload.amount;
+    const newCycleInterest = Math.max(
+      1,
+      Math.round((newCurrent * Number(loan.interest_rate)) / 100),
+    );
+
+    const nextSnap: LoanTermsSnapshot = {
+      ...prevSnap,
+      current_capital: newCurrent,
+      capital_added: Number(prevSnap.capital_added ?? 0) + payload.amount,
+    };
+
+    const today = todayBogota();
+    const { data: futureUnpaid } = await adminClient
+      .from('loan_installments')
+      .select('*')
+      .eq('loan_id', id)
+      .eq('paid_amount', 0)
+      .gt('due_date', today)
+      .order('installment_number', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    let interestDiff = 0;
+    if (futureUnpaid) {
+      interestDiff = newCycleInterest - Number(futureUnpaid.original_amount);
+      await adminClient
+        .from('loan_installments')
+        .update({ original_amount: newCycleInterest })
+        .eq('id', futureUnpaid.id);
+    }
+
+    const { data: updatedLoan, error: updErr } = await adminClient
+      .from('loans')
+      .update({
+        capital: newTotalCapital,
+        contractual_interest: Number(loan.contractual_interest) + interestDiff,
+        contractual_total: Number(loan.contractual_total) + payload.amount + interestDiff,
+        terms_snapshot: nextSnap,
+      })
+      .eq('id', id)
+      .select('*')
+      .single();
+
+    if (updErr) return NextResponse.json({ error: updErr.message }, { status: 500 });
+
+    await adminClient.from('financial_adjustments').insert({
+      loan_id: id,
+      adjustment_type: 'capital_addition',
+      amount: payload.amount,
+      reason: payload.reason,
+      original_data: { prev_capital: prevCurrent, new_capital: newCurrent },
+      created_by: user.id,
+    });
+
+    await writeAuditLog(adminClient, {
+      actor_id: user.id,
+      action: 'loan_capital_added',
+      entity_type: 'loan',
+      entity_id: id,
+      old_data: { current_capital: prevCurrent },
+      new_data: { current_capital: newCurrent, added: payload.amount },
+      reason: payload.reason,
+    });
+
+    return NextResponse.json({ loan: updatedLoan });
+  }
+
+  if (payload.action === 'capitalize_interest') {
+    if (profile.role !== 'admin') {
+      return NextResponse.json(
+        { error: 'Solo un administrador puede capitalizar intereses vencidos.' },
+        { status: 403 },
+      );
+    }
+    if (billingMode !== 'monthly_interest_only') {
+      return NextResponse.json(
+        { error: 'La capitalización de intereses aplica a préstamos mensuales sobre saldo.' },
+        { status: 400 },
+      );
+    }
+
+    const { data: inst } = await adminClient
+      .from('loan_installments')
+      .select('*')
+      .eq('id', payload.installment_id)
+      .eq('loan_id', id)
+      .maybeSingle();
+
+    if (!inst) {
+      return NextResponse.json({ error: 'Cuota de interés no encontrada.' }, { status: 404 });
+    }
+    const unpaid = Math.max(0, Number(inst.original_amount) - Number(inst.paid_amount));
+    if (unpaid <= 0) {
+      return NextResponse.json({ error: 'Esta cuota de interés ya está saldada.' }, { status: 400 });
+    }
+
+    const prevSnap = (loan.terms_snapshot ?? {}) as LoanTermsSnapshot;
+    const prevCurrent = Number(prevSnap.current_capital ?? loan.capital);
+    const newCurrent = prevCurrent + unpaid;
+    const newTotalCapital = Number(loan.capital) + unpaid;
+
+    // Close the capitalized interest cycle cleanly (set original_amount = max(1, paid_amount) or mark paid)
+    if (Number(inst.paid_amount) > 0) {
+      await adminClient
+        .from('loan_installments')
+        .update({ original_amount: Number(inst.paid_amount), status: 'paid' })
+        .eq('id', inst.id);
+    } else {
+      await adminClient
+        .from('loan_installments')
+        .update({ paid_amount: Number(inst.original_amount), status: 'paid', penalty_frozen: true })
+        .eq('id', inst.id);
+    }
+
+    // Check if another unpaid cycle exists; if not, generate next month on new capital
+    const { data: remainingCycles } = await adminClient
+      .from('loan_installments')
+      .select('id')
+      .eq('loan_id', id)
+      .neq('status', 'paid');
+
+    let nextCount = Number(loan.installments_count);
+    let extraInterest = 0;
+    let nextCycleDate = prevSnap.next_cycle_date ?? inst.scheduled_due_date;
+
+    if ((remainingCycles ?? []).length === 0) {
+      const { data: holidays } = await adminClient.from('business_holidays').select('holiday_date');
+      const holidayDates = (holidays ?? []).map((h) => h.holiday_date as string);
+      const billingDay = Number(prevSnap.billing_day ?? Number(inst.scheduled_due_date.slice(8, 10)));
+      nextCycleDate = nextCalendarMonthDate(inst.scheduled_due_date, billingDay);
+      const nextDue = shiftToWorkingDay(nextCycleDate, holidayDates);
+      const nextAmount = Math.max(1, Math.round((newCurrent * Number(loan.interest_rate)) / 100));
+      nextCount += 1;
+      extraInterest = nextAmount;
+
+      await adminClient.from('loan_installments').insert({
+        loan_id: id,
+        installment_number: nextCount,
+        scheduled_due_date: nextCycleDate,
+        due_date: nextDue,
+        original_amount: nextAmount,
+        paid_amount: 0,
+        status: 'pending',
+        penalty_frozen: false,
+      });
+    }
+
+    const nextSnap: LoanTermsSnapshot = {
+      ...prevSnap,
+      current_capital: newCurrent,
+      capital_added: Number(prevSnap.capital_added ?? 0) + unpaid,
+      next_cycle_date: nextCycleDate,
+    };
+
+    const { data: updatedLoan, error: updErr } = await adminClient
+      .from('loans')
+      .update({
+        capital: newTotalCapital,
+        installments_count: nextCount,
+        contractual_interest: Number(loan.contractual_interest) + extraInterest,
+        contractual_total: Number(loan.contractual_total) + unpaid + extraInterest,
+        terms_snapshot: nextSnap,
+      })
+      .eq('id', id)
+      .select('*')
+      .single();
+
+    if (updErr) return NextResponse.json({ error: updErr.message }, { status: 500 });
+
+    await adminClient.from('financial_adjustments').insert({
+      loan_id: id,
+      adjustment_type: 'interest_capitalized',
+      amount: unpaid,
+      reason: payload.reason?.trim() || `Capitalización de interés cuota #${inst.installment_number}`,
+      original_data: {
+        installment_id: inst.id,
+        prev_capital: prevCurrent,
+        new_capital: newCurrent,
+      },
+      created_by: user.id,
+    });
+
+    await writeAuditLog(adminClient, {
+      actor_id: user.id,
+      action: 'loan_interest_capitalized',
+      entity_type: 'loan',
+      entity_id: id,
+      old_data: { current_capital: prevCurrent },
+      new_data: { current_capital: newCurrent, capitalized: unpaid },
+      reason: payload.reason ?? null,
+    });
+
+    return NextResponse.json({ loan: updatedLoan });
+  }
+
   // change_status
   const targetStatus = payload.status;
-  if (targetStatus === 'blocked' || targetStatus === 'archived' || (loan.status === 'blocked' && targetStatus === 'active')) {
+  if (
+    targetStatus === 'blocked' ||
+    targetStatus === 'archived' ||
+    (loan.status === 'blocked' && targetStatus === 'active')
+  ) {
     if (profile.role !== 'admin') {
       return NextResponse.json(
         { error: 'Solo un administrador puede cambiar el estado a bloqueado o archivado.' },
@@ -292,18 +534,23 @@ export async function PATCH(
     (s, p) => s + Math.max(0, Number(p.amount) - Number(p.paid_amount)),
     0,
   );
+  const pendingPrincipal = getLoanCurrentCapital(loan);
 
-  if (targetStatus === 'finished' && pendingInstBalance + pendingPenBalance > 0) {
+  if (targetStatus === 'finished' && pendingPrincipal + pendingInstBalance + pendingPenBalance > 0) {
     return NextResponse.json(
       {
         error:
-          'No se puede finalizar un préstamo con saldo pendiente en cuotas o penalizaciones. Registra el pago o aplica un ajuste administrativo primero.',
+          'No se puede finalizar un préstamo con capital, cuotas o penalizaciones pendientes.',
       },
       { status: 409 },
     );
   }
 
-  if (targetStatus === 'archived' && loan.status !== 'draft' && pendingInstBalance + pendingPenBalance > 0) {
+  if (
+    targetStatus === 'archived' &&
+    loan.status !== 'draft' &&
+    pendingPrincipal + pendingInstBalance + pendingPenBalance > 0
+  ) {
     return NextResponse.json(
       { error: 'Solo puedes archivar préstamos en borrador o completamente finalizados.' },
       { status: 409 },

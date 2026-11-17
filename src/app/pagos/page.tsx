@@ -43,6 +43,12 @@ interface PendingPenalty {
   due_date: string;
 }
 
+interface OpenCapitalLoan {
+  loan_id: string;
+  interest_rate: number;
+  current_capital: number;
+}
+
 interface PaymentHistoryItem {
   id: string;
   received_amount: number;
@@ -61,6 +67,7 @@ interface PaymentHistoryItem {
     installment: { installment_number: number; due_date: string } | null;
     penalty: { period_number: number } | null;
   }[];
+  capital_payments?: { id: string; loan_id: string; amount: number }[];
 }
 
 function PagosContent() {
@@ -75,8 +82,10 @@ function PagosContent() {
   const [customerId, setCustomerId] = useState(initialCustomerId);
   const [installments, setInstallments] = useState<PendingInstallment[]>([]);
   const [penalties, setPenalties] = useState<PendingPenalty[]>([]);
+  const [openCapitalLoans, setOpenCapitalLoans] = useState<OpenCapitalLoan[]>([]);
   const [instValues, setInstValues] = useState<Record<string, string>>({});
   const [penValues, setPenValues] = useState<Record<string, string>>({});
+  const [capValues, setCapValues] = useState<Record<string, string>>({});
   const [lumpSum, setLumpSum] = useState('');
   const [method, setMethod] = useState<'cash' | 'transfer'>('cash');
   const [reference, setReference] = useState('');
@@ -97,9 +106,11 @@ function PagosContent() {
   const loadCustomerDebts = useCallback(async (cid: string) => {
     setInstValues({});
     setPenValues({});
+    setCapValues({});
     if (!cid) {
       setInstallments([]);
       setPenalties([]);
+      setOpenCapitalLoans([]);
       return;
     }
     const res = await fetch(`/api/installments?customerId=${cid}&onlyUnpaid=true`, {
@@ -109,6 +120,7 @@ function PagosContent() {
     if (res.ok) {
       setInstallments(json.installments ?? []);
       setPenalties(json.penalties ?? []);
+      setOpenCapitalLoans(json.open_capital_loans ?? []);
     }
   }, []);
 
@@ -176,10 +188,12 @@ function PagosContent() {
 
   const totalInst = Object.values(instValues).reduce((s, v) => s + (Math.round(Number(v)) || 0), 0);
   const totalPen = Object.values(penValues).reduce((s, v) => s + (Math.round(Number(v)) || 0), 0);
-  const totalAllocated = totalInst + totalPen;
+  const totalCap = Object.values(capValues).reduce((s, v) => s + (Math.round(Number(v)) || 0), 0);
+  const totalAllocated = totalInst + totalPen + totalCap;
   const totalCustomerDebt =
     installments.reduce((s, i) => s + i.remaining_amount, 0) +
-    penalties.reduce((s, p) => s + p.remaining, 0);
+    penalties.reduce((s, p) => s + p.remaining, 0) +
+    openCapitalLoans.reduce((s, l) => s + l.current_capital, 0);
 
   async function submitPayment(e: FormEvent) {
     e.preventDefault();
@@ -207,6 +221,13 @@ function PagosContent() {
         amount: Math.round(Number(v)),
       }));
 
+    const capital_payments = Object.entries(capValues)
+      .filter(([, v]) => Math.round(Number(v)) > 0)
+      .map(([loan_id, v]) => ({
+        loan_id,
+        amount: Math.round(Number(v)),
+      }));
+
     setSaving(true);
     try {
       const res = await fetch('/api/payments', {
@@ -220,6 +241,7 @@ function PagosContent() {
           idempotency_key: crypto.randomUUID(),
           installment_allocations,
           penalty_allocations,
+          capital_payments,
         }),
       });
       const json = await res.json();
@@ -231,21 +253,16 @@ function PagosContent() {
       notify(
         json.finished_loans?.length
           ? 'Pago registrado y préstamo saldado al 100%.'
-          : 'Pago registrado y auditado correctamente.',
+          : json.generated_cycles?.length
+            ? 'Pago registrado. Se generó automáticamente el siguiente ciclo mensual.'
+            : 'Pago registrado y auditado correctamente.',
         'success',
       );
 
       const instLookup = new Map(installments.map((i) => [i.id, i]));
       const penLookup = new Map(penalties.map((p) => [p.id, p]));
-      setReceipt({
-        id: json.payment.id,
-        received_amount: json.payment.received_amount,
-        method: json.payment.method,
-        transfer_reference: json.payment.transfer_reference,
-        received_at: json.payment.received_at,
-        customer: json.customer,
-        business_profile: json.business_profile,
-        allocations: (json.allocations ?? []).map(
+      const receiptAllocs = [
+        ...(json.allocations ?? []).map(
           (a: { id: string; installment_id?: string; penalty_id?: string; amount: number }) => {
             const inst = a.installment_id ? instLookup.get(a.installment_id) : null;
             const pen = a.penalty_id ? penLookup.get(a.penalty_id) : null;
@@ -259,6 +276,23 @@ function PagosContent() {
             };
           },
         ),
+        ...(json.capital_payments ?? []).map(
+          (c: { loan_id: string; amount: number }, idx: number) => ({
+            id: `cap-${idx}-${c.loan_id}`,
+            amount: c.amount,
+            label: `Abono a capital (Crédito #${c.loan_id.slice(0, 8).toUpperCase()})`,
+          }),
+        ),
+      ];
+      setReceipt({
+        id: json.payment.id,
+        received_amount: json.payment.received_amount,
+        method: json.payment.method,
+        transfer_reference: json.payment.transfer_reference,
+        received_at: json.payment.received_at,
+        customer: json.customer,
+        business_profile: json.business_profile,
+        allocations: receiptAllocs,
       });
 
       setReference('');
@@ -408,6 +442,7 @@ function PagosContent() {
                   onClick={() => {
                     setInstValues({});
                     setPenValues({});
+                    setCapValues({});
                     setLumpSum('');
                   }}
                   className="rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-xs font-medium text-slate-600 hover:bg-slate-50"
@@ -549,6 +584,61 @@ function PagosContent() {
               </table>
             </div>
 
+            {/* Open Capital (Monthly Interest-Only) */}
+            {openCapitalLoans.length > 0 && (
+              <div className="mt-6 rounded-xl border border-slate-200 bg-slate-50/70 p-4">
+                <h3 className="text-xs font-bold uppercase tracking-wide text-slate-700">
+                  Abono directo a capital (Préstamos solo interés)
+                </h3>
+                <p className="mt-0.5 text-xs text-slate-500">
+                  Opcional: si el cliente abona a capital además de sus intereses, el próximo ciclo
+                  mensual se recalculará sobre el capital restante.
+                </p>
+                <div className="mt-3 space-y-2.5">
+                  {openCapitalLoans.map((ocl) => (
+                    <div
+                      key={ocl.loan_id}
+                      className="flex flex-wrap items-center justify-between gap-3 rounded-lg bg-white p-3 ring-1 ring-slate-200"
+                    >
+                      <div className="text-xs">
+                        <p className="font-semibold text-slate-900">
+                          Crédito #{ocl.loan_id.slice(0, 8).toUpperCase()} ({ocl.interest_rate}%/mes)
+                        </p>
+                        <p className="text-slate-500">
+                          Capital vivo: <b>{formatCOP(ocl.current_capital)}</b>
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="number"
+                          min="0"
+                          max={ocl.current_capital}
+                          value={capValues[ocl.loan_id] ?? ''}
+                          onChange={(e) =>
+                            setCapValues({ ...capValues, [ocl.loan_id]: e.target.value })
+                          }
+                          placeholder="Abono a capital"
+                          className="w-40"
+                        />
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setCapValues({
+                              ...capValues,
+                              [ocl.loan_id]: String(ocl.current_capital),
+                            })
+                          }
+                          className="shrink-0 rounded-lg border border-slate-200 px-2.5 py-1.5 text-[11px] font-semibold text-slate-700 hover:bg-slate-50"
+                        >
+                          Liquidar
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {formError && (
               <p
                 role="alert"
@@ -581,6 +671,14 @@ function PagosContent() {
                   <dt className="text-slate-400">Aplicado a cuotas</dt>
                   <dd className="tabular-nums font-medium">{formatCOP(totalInst)}</dd>
                 </div>
+                {totalCap > 0 && (
+                  <div className="flex justify-between">
+                    <dt className="text-slate-400">Abono a capital</dt>
+                    <dd className="tabular-nums font-medium text-emerald-300">
+                      {formatCOP(totalCap)}
+                    </dd>
+                  </div>
+                )}
                 <div className="flex justify-between">
                   <dt className="text-slate-400">Aplicado a moras</dt>
                   <dd className="tabular-nums font-medium">{formatCOP(totalPen)}</dd>
@@ -690,17 +788,24 @@ function PagosContent() {
                               received_at: pay.received_at,
                               customer: pay.customer,
                               business_profile: settings.business_profile,
-                              allocations: pay.allocations.map((a) => ({
-                                id: a.id,
-                                installment_id: a.installment_id,
-                                penalty_id: a.penalty_id,
-                                amount: a.amount,
-                                label: a.installment
-                                  ? `Cuota #${a.installment.installment_number} (${formatDateCO(a.installment.due_date)})`
-                                  : a.penalty
-                                    ? `Penalización período ${a.penalty.period_number}`
-                                    : 'Abono',
-                              })),
+                              allocations: [
+                                ...pay.allocations.map((a) => ({
+                                  id: a.id,
+                                  installment_id: a.installment_id,
+                                  penalty_id: a.penalty_id,
+                                  amount: a.amount,
+                                  label: a.installment
+                                    ? `Cuota #${a.installment.installment_number} (${formatDateCO(a.installment.due_date)})`
+                                    : a.penalty
+                                      ? `Penalización período ${a.penalty.period_number}`
+                                      : 'Abono',
+                                })),
+                                ...(pay.capital_payments ?? []).map((c) => ({
+                                  id: c.id,
+                                  amount: c.amount,
+                                  label: `Abono a capital (Crédito #${c.loan_id.slice(0, 8).toUpperCase()})`,
+                                })),
+                              ],
                             })
                           }
                           className="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50"

@@ -29,6 +29,7 @@ export const loanCreateSchema = z
     capital: z.number().int('El capital debe ser entero en COP').positive('El capital debe ser mayor a 0'),
     interest_rate: z.number().min(0, 'El interés no puede ser negativo').max(1000, 'Interés fuera de rango'),
     frequency: z.enum(['daily', 'weekly', 'biweekly', 'monthly']),
+    billing_mode: z.enum(['fixed_installments', 'monthly_interest_only']).default('fixed_installments'),
     installments_count: z.number().int().min(1, 'Mínimo 1 cuota').max(365, 'Máximo 365 cuotas'),
     disbursement_date: z.string().regex(isoDateRegex, 'Fecha de desembolso inválida'),
     first_payment_date: z.string().regex(isoDateRegex, 'Fecha de primera cuota inválida'),
@@ -56,6 +57,16 @@ export const loanPatchSchema = z.discriminatedUnion('action', [
     action: z.literal('update_notes'),
     notes: z.string().trim().max(1000).nullable(),
   }),
+  z.object({
+    action: z.literal('add_capital'),
+    amount: z.number().int().positive('El capital adicional debe ser positivo'),
+    reason: z.string().trim().min(3, 'Indica el motivo o detalle del nuevo capital').max(400),
+  }),
+  z.object({
+    action: z.literal('capitalize_interest'),
+    installment_id: z.string().uuid('Cuota inválida'),
+    reason: z.string().trim().max(400).optional().nullable(),
+  }),
 ]);
 
 export const paymentCreateSchema = z
@@ -81,10 +92,23 @@ export const paymentCreateSchema = z
         }),
       )
       .default([]),
+    capital_payments: z
+      .array(
+        z.object({
+          loan_id: z.string().uuid(),
+          amount: z.number().int().positive('Cada abono a capital debe ser positivo'),
+        }),
+      )
+      .default([]),
   })
-  .refine((v) => v.installment_allocations.length + v.penalty_allocations.length > 0, {
-    message: 'Debes asignar al menos una cuota o penalización',
-  })
+  .refine(
+    (v) =>
+      v.installment_allocations.length + v.penalty_allocations.length + v.capital_payments.length >
+      0,
+    {
+      message: 'Debes asignar al menos una cuota, mora o abono a capital',
+    },
+  )
   .refine((v) => v.method !== 'transfer' || Boolean(v.transfer_reference?.trim()), {
     message: 'La referencia es obligatoria para transferencias',
     path: ['transfer_reference'],

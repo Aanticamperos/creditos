@@ -2,7 +2,12 @@ import { NextResponse, type NextRequest } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { writeAuditLog } from '@/lib/audit';
 import { todayBogota } from '@/lib/dates';
-import { computeEffectiveInstallmentStatus } from '@/lib/financial';
+import {
+  computeEffectiveInstallmentStatus,
+  getLoanBillingMode,
+  getLoanCurrentCapital,
+  type LoanTermsSnapshot,
+} from '@/lib/financial';
 import { customerUpdateSchema, firstZodError } from '@/lib/validation';
 
 export async function GET(
@@ -101,16 +106,25 @@ export async function GET(
       }
     }
 
+    const billingMode = getLoanBillingMode(loan.terms_snapshot);
+    const currentCapital = getLoanCurrentCapital(loan);
+    const capitalPaid =
+      billingMode === 'monthly_interest_only'
+        ? Number((loan.terms_snapshot as LoanTermsSnapshot | null)?.capital_paid ?? 0)
+        : 0;
+
     if (loan.status !== 'draft' && loan.status !== 'archived') {
       totalCapitalBorrowed += Number(loan.capital);
-      totalPendingBalance += remainingInstallments;
+      totalPendingBalance += remainingInstallments + currentCapital;
       totalPenaltiesPending += remainingPenalties;
     }
 
     return {
       ...loan,
-      paid_amount: paidAmount,
-      remaining_installments: remainingInstallments,
+      billing_mode: billingMode,
+      current_capital: currentCapital,
+      paid_amount: paidAmount + capitalPaid,
+      remaining_installments: remainingInstallments + currentCapital,
       remaining_penalties: remainingPenalties,
       overdue_count: overdueCount,
       installments_total: loanInst.length,

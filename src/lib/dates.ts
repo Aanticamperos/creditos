@@ -56,3 +56,17 @@ export function formatDateTimeCO(isoTimestamp: string | null | undefined): strin
   if (Number.isNaN(date.getTime())) return isoTimestamp;
   return dateTimeFormatter.format(date);
 }
+
+/** Computes the next calendar-month date anchored to `billingDay` (1..31), clamping to month end. */
+export function nextCalendarMonthDate(afterISO: string, billingDay: number): string {
+  const [yStr, mStr] = afterISO.split('-');
+  let year = Number(yStr);
+  let month = Number(mStr) + 1;
+  if (month > 12) {
+    month = 1;
+    year += 1;
+  }
+  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  const clampedDay = Math.min(Math.max(1, billingDay), daysInMonth);
+  return `${year}-${String(month).padStart(2, '0')}-${String(clampedDay).padStart(2, '0')}`;
+}
