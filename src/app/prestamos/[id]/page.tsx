@@ -491,11 +491,25 @@ function LoanDetailContent() {
               </div>
               <div>
                 <p className="text-xs text-slate-500">
-                  Interés ({loan.interest_rate}%{data.summary.billingMode === 'monthly_interest_only' ? '/mes' : ''})
+                  {data.summary.billingMode === 'monthly_interest_only'
+                    ? `Cuota mensual (${loan.interest_rate}%/mes)`
+                    : `Interés (${loan.interest_rate}%)`}
                 </p>
                 <p className="tabular-nums mt-1 text-lg font-bold text-slate-900">
-                  {formatCOP(loan.contractual_interest)}
+                  {formatCOP(
+                    data.summary.billingMode === 'monthly_interest_only'
+                      ? Math.round(
+                          ((data.summary.currentCapital ?? loan.capital) * loan.interest_rate) /
+                            100,
+                        )
+                      : loan.contractual_interest,
+                  )}
                 </p>
+                {data.summary.billingMode === 'monthly_interest_only' && (
+                  <p className="text-[11px] text-slate-400">
+                    Acumulado ciclos: {formatCOP(loan.contractual_interest)}
+                  </p>
+                )}
               </div>
               <div>
                 <p className="text-xs text-slate-500">
@@ -533,21 +547,40 @@ function LoanDetailContent() {
               </div>
             </div>
 
-            <div className="mt-5">
-              <div className="flex justify-between text-xs text-slate-500">
+            {data.summary.billingMode === 'monthly_interest_only' ? (
+              <div className="mt-5 flex flex-wrap items-center justify-between gap-2 rounded-xl bg-slate-50 px-4 py-2.5 text-xs text-slate-600">
                 <span>
-                  Avance: {data.summary.paidCount} de {data.summary.installmentsCount} cuotas
-                  pagadas
+                  Ciclo abierto mensual · <b>{data.summary.paidCount}</b> cuota(s) de interés
+                  pagadas · Próxima cuota:{' '}
+                  <b>
+                    {formatCOP(
+                      Math.round(
+                        ((data.summary.currentCapital ?? loan.capital) * loan.interest_rate) / 100,
+                      ),
+                    )}
+                  </b>
                 </span>
-                <span className="font-semibold text-slate-800">{progressPct}%</span>
+                <span className="font-semibold text-emerald-700">
+                  Capital vivo: {formatCOP(data.summary.currentCapital ?? loan.capital)}
+                </span>
               </div>
-              <div className="mt-1.5 h-2 overflow-hidden rounded-full bg-slate-100">
-                <div
-                  className="h-full rounded-full bg-emerald-500 transition-all"
-                  style={{ width: `${progressPct}%` }}
-                />
+            ) : (
+              <div className="mt-5">
+                <div className="flex justify-between text-xs text-slate-500">
+                  <span>
+                    Avance: {data.summary.paidCount} de {data.summary.installmentsCount} cuotas
+                    pagadas
+                  </span>
+                  <span className="font-semibold text-slate-800">{progressPct}%</span>
+                </div>
+                <div className="mt-1.5 h-2 overflow-hidden rounded-full bg-slate-100">
+                  <div
+                    className="h-full rounded-full bg-emerald-500 transition-all"
+                    style={{ width: `${progressPct}%` }}
+                  />
+                </div>
               </div>
-            </div>
+            )}
           </section>
 
           {/* Complete Installments Schedule */}

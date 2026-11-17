@@ -352,7 +352,14 @@ function PrestamosContent() {
                           {formatCOP(loan.capital)}
                         </td>
                         <td className="tabular-nums px-4 py-3 text-right font-semibold text-slate-900">
-                          {formatCOP(loan.contractual_total)}
+                          {loan.billing_mode === 'monthly_interest_only'
+                            ? `${formatCOP(
+                                Math.round(
+                                  ((loan.current_capital ?? loan.capital) * loan.interest_rate) /
+                                    100,
+                                ),
+                              )}/mes`
+                            : formatCOP(loan.contractual_total)}
                         </td>
                         <td className="px-4 py-3">
                           {loan.billing_mode === 'monthly_interest_only' ? (
